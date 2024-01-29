@@ -1,0 +1,502 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Data comparison</title>
+    <style>
+        body::-webkit-scrollbar {
+            display: none;
+        }
+
+        /* Hide scrollbar for IE, Edge and Firefox */
+        html,
+        body {
+            -ms-overflow-style: none;
+            /* IE and Edge */
+            scrollbar-width: none;
+            /* Firefox */
+        }
+
+
+        .compare {
+            display: grid;
+            /* justify-content: space-between; */
+            position: relative;
+
+            grid-template-columns: 50% 50%;
+            margin-top: 20px;
+        }
+
+        .box {
+            /* width: 50%; */
+            flex-shrink: 0;
+            /* height: 100%; */
+
+            background: #F1F5FF;
+
+        }
+
+        .box>h1 {
+            text-align: center;
+            color: #171933;
+            font-weight: 700;
+            font-size: 26px;
+        }
+
+
+        #left-box {
+            border-right: 1px solid red;
+        }
+
+        iframe {
+            width: 100%;
+            height: 600px;
+
+            margin-top: 20px;
+        }
+
+        .box__data {
+            height: 500px;
+            overflow: auto;
+
+            scrollbar-width: thin;
+            scrollbar-color: #082B45 #efefef;
+            padding: 0 10px;
+
+        }
+
+        .box__data::-webkit-scrollbar {
+            width: 6px;
+        }
+
+
+        .box__data::-webkit-scrollbar-track {
+            background: #efefef;
+        }
+
+        .box__data::-webkit-scrollbar-thumb {
+            background: #082B45;
+            border-radius: 5px;
+        }
+
+        .box__data::-webkit-scrollbar-thumb:hover {
+            background: #888;
+        }
+
+        .box__data>div {
+            padding: 10px;
+            margin-bottom: 10px;
+            border-radius: 20px;
+            background: #FFF;
+            box-shadow: 0px 15px 30px -10px rgba(168, 186, 229, 0.53);
+        }
+    </style>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/protobufjs/7.2.6/protobuf.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/dayjs/1.11.10/dayjs.min.js" integrity="sha512-FwNWaxyfy2XlEINoSnZh1JQ5TRRtGow0D6XcmAWmYCRgvqOUTnzCxPc9uF35u5ZEpirk1uhlPVA19tflhvnW1g==" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+</head>
+
+<body>
+
+    <div class="container">
+        <div>
+            <label for="company">Choose Instrument</label>
+            <select id="company">
+            </select>
+            <input type="text" id="customInstrument" placeholder="Enter custom instrument..." style="display: none" />
+            <!-- <button id="join">Subscribe</button> -->
+            <!-- <button id="leave">Unsubscribe</button> -->
+            <button id="clear">Clear</button>
+
+            <div>
+                <p><i id="clock"></i></p>
+                <p><i id="clockLocal"></i></p>
+                <p><i id="clockDiff"></i></p>
+            </div>
+            <div id="output"></div>
+
+        </div>
+
+        <div class="compare" id="compare">
+            <div class="box left" id="azure-box">
+                <h1>Real-time Trades</h1>
+
+                <div id="euroland" class="box__data"></div>
+            </div>
+            <div class="box" id="yahoo-box">
+                <h1>Yahoo</h1>
+
+                <div id="yahoo" class="box__data"></div>
+            </div>
+        </div>
+        <div>
+            <iframe id="iframeId" src="https://dev.vn.euroland.com/tools/sharegraph3/?companycode=dk-cbg"
+                frameborder="0"></iframe>
+        </div>
+    </div>
+
+    <script>
+        ; (async () => {
+            async function loadFinanceYahooProto() {
+                return new Promise((resolve, reject) => {
+                    protobuf.load('./finance.proto', (err, root) => {
+                        if (err) reject(err);
+                        else {
+                            // Obtain the message type
+                            const YahooData = root.lookupType('YahooData');
+                            resolve(YahooData)
+                        }
+
+                    });
+                })
+            }
+
+            async function getAzureSocketLink() {
+                const LOCAL_BASE_URL = "http://localhost:7071";
+                const REMOTE_BASE_URL =
+                    "https://func-rt-trades-evh-wps.azurewebsites.net";
+                const getAPIBaseUrl = () =>
+                    /localhost/.test(window.location.href)
+                        ? LOCAL_BASE_URL
+                        : REMOTE_BASE_URL;
+
+                const hub = "trades"; // "snapshot"
+                const apiUrl = `${getAPIBaseUrl()}/api/negotiate` + "?hub=" + hub;
+                const res = await fetch(apiUrl);
+                const data = await res.json();
+                return data
+            }
+            const [YahooData, azureLink] = await Promise.all([
+                loadFinanceYahooProto(),
+                getAzureSocketLink()
+            ]);
+
+            // Connect to the WebSocket server
+            const yahooWs = new WebSocket('wss://streamer.finance.yahoo.com/');
+            const azureWs = new WebSocket(azureLink, "json.webpubsub.azure.v1");
+
+
+
+
+            const output = document.querySelector("#output");
+            // const join = document.querySelector("#join");
+            // const leave = document.querySelector("#leave");
+            const clear = document.querySelector("#clear");
+            const yahooElement = document.getElementById('yahoo');
+            const containerElement = document.getElementById('compare');
+            const azureElement = document.getElementById('euroland');
+
+
+            // join.onclick = () => requestWebsocket("joinGroup");
+            // leave.onclick = () => requestWebsocket("leaveGroup");
+            clear.onclick = () => {
+                clearOutputData();
+            }
+
+            let ackId = 0;
+            let clockDiffMs = 0;
+            let prevSelectedValue = '';
+
+            let yahooCount = 1;
+            let azureCount = 1;
+
+            function getClockDiff() {
+                setInterval(async () => {
+                    const res2 = await fetch("https://worldtimeapi.org/api/ip");
+                    const data2 = await res2.json();
+                    const serverClockUTC = new Date(data2.utc_datetime);
+                    setClock("#clock", "Server time (UTC):", serverClockUTC);
+                    const currentLocal = new Date();
+                    setClock("#clockLocal", "Local time (UTC):", currentLocal);
+                    clockDiffMs = currentLocal - serverClockUTC;
+                    clockDiff.innerText = "Clock difference: " + clockDiffMs + "ms";
+                }, 1000);
+            }
+
+            getClockDiff()
+
+            // const instrumentValue = document.getElementById("instrument")
+            // Constant variable containing options for the select tag
+            const COMPANY_OPTIONS = [
+                {
+                    instrumentId: '4879',
+                    stockQuote: 'BTC-USD',
+                    link: 'https://dev.vn.euroland.com/tools/sharegraph3/?companycode=dk-cbg',
+                    name: 'Test'
+                },
+                {
+                    instrumentId: '4879',
+                    stockQuote: 'VOD.L',
+                    link: 'https://dev.vn.euroland.com/tools/sharegraph3/?companycode=dk-cbg',
+                    name: 'Vodafone Group Public Limited Company'
+                },
+                {
+                    instrumentId: '107277',
+                    stockQuote: '000660.KS',
+                    link: 'https://dev.vn.euroland.com/tools/sharegraph3/?companycode=s-volv',
+                    name: 'SK Hynix'
+                },
+                {
+                    instrumentId: '32865',
+                    stockQuote: 'CARL-B.CO',
+                    link: 'https://dev.vn.euroland.com/tools/sharegraph3/?companycode=dk-cbg',
+                    name: 'Carbug'
+                },
+                {
+                    instrumentId: '128247',
+                    stockQuote: 'ASTK.CO',
+                    link: 'https://gamma.euroland.com/tools/sharegraph3?companycode=dk-asetek',
+                    name: 'Asetek A/S'
+                },
+            ];
+
+            // Function to render the select tag
+            function renderSelect(options, containerId) {
+                // Get the container element by ID
+                const select = document.getElementById(containerId);
+
+                // Loop through the options and create option elements
+                options.forEach(opt => {
+                    const option = document.createElement('option');
+                    option.text = `${opt.instrumentId} - ${opt.stockQuote} - ${opt.name}`;
+                    option.value = opt.instrumentId; // You can set a different value if needed
+                    select.add(option);
+                });
+            }
+
+            // Call the renderSelect function with the constant variable and container ID
+            renderSelect(COMPANY_OPTIONS, 'company');
+
+            const companySelect = document.getElementById('company')
+            prevSelectedValue = companySelect.value;
+
+            // Add event listener to get the selected value
+            companySelect.addEventListener('change', function () {
+                const selectedOption = getSelectedCompany()
+                document.getElementById('iframeId').src = selectedOption.link
+                clearOutput();
+                clearOutputData()
+                // Unsubscribe
+                requestWebsocket('leaveGroup', 'both', prevSelectedValue)
+
+                // Subscribe
+                requestWebsocket('joinGroup', 'both')
+                prevSelectedValue = companySelect.value;
+            });
+
+            yahooWs.addEventListener('open', () => {
+                console.log('Connected to Yahoo Finance WebSocket');
+                requestWebsocket('joinGroup', 'stockQuote')
+            });
+
+            azureWs.onopen = () => {
+                console.log('Connected to azureWs WebSocket');
+                requestWebsocket('joinGroup', 'instrument')
+            }
+
+            const convertBase64 = (base64String) => {
+                // Your Base64 encoded string
+
+                // Decode the Base64 string
+                var binaryString = atob(base64String);
+
+                // Create a buffer (Uint8Array) from the binary data
+                var buffer = new Uint8Array(binaryString.length);
+                for (var i = 0; i < binaryString.length; i++) {
+                    buffer[i] = binaryString.charCodeAt(i);
+                }
+
+                return buffer
+            }
+
+            yahooWs.addEventListener('message', (event) => {
+                try {
+                    var message = YahooData.decode(convertBase64(event.data)).toJSON();
+
+                    console.log('----------------- Yahoo Finance: ------------------',);
+                    console.log('data', message);
+                    let currentUTC = new Date(Date.now() - clockDiffMs);
+                    console.log("Yahoo Finance currentUTC:", currentUTC, currentUTC.getTime())
+                    console.log("Yahoo Finance clockDiffMs:", clockDiffMs, Date.now(), Date.now() - clockDiffMs)
+
+                    const yTradeTime = new Date(Number(message.time));
+                    const delayTime = (
+                        (currentUTC.getTime() - yTradeTime.getTime()) /
+                        1000
+                    ).toFixed(2);
+                    console.log("Yahoo Finance tradeTime:", yTradeTime.getTime())
+
+                    console.log("Yahoo Finance delayTime:", delayTime)
+                    console.log("Dayjs Yahoo tradeTime", dayjs(Number(message.time)).format('HH:mm:ss:SSS') );
+                    console.log("Dayjs Yahoo  currentUtc", dayjs(currentUTC).format('HH:mm:ss:SSS'));
+                    console.log("Dayjs Yahoo  now", dayjs().format('HH:mm:ss:SSS'));
+
+                    console.log('---------------------------------------------------',);
+
+                    let dataText = ``;
+                    for (const property in message) {
+                        let msg = `<b>${property}:</b> ${message[property]}`;
+                        if (property === 'time') {
+                            msg = `<b>time:</b> ${yTradeTime.toISOString()}`;
+                        }
+
+                        dataText += `${msg}, `
+                    }
+
+                    const receivedInfo = createMessage(
+                        `${yahooCount}. Received: ${currentUTC.toISOString()} - Actual traded: ${yTradeTime.toISOString()} - Delayed: ${delayTime} seconds`, "green"
+                    );
+
+                    const divContainer = document.createElement("div");
+                    const yahooContent = document.createElement("p");
+                    yahooContent.innerHTML = dataText;
+
+                    divContainer.appendChild(receivedInfo);
+                    divContainer.appendChild(yahooContent);
+                    yahooElement.appendChild(divContainer);
+
+                    yahooCount += 1;
+
+                    yahooElement.scrollTo({
+                        top: yahooElement.scrollHeight,
+                        behavior: 'smooth'
+                    });
+
+                } catch (error) {
+                    console.error('Error decoding protobuf message:', error);
+                }
+            })
+
+
+
+            yahooWs.addEventListener('close', () => {
+                console.log('Connection to Yahoo Finance WebSocket closed');
+            });
+
+            yahooWs.addEventListener('error', (error) => {
+                console.error('WebSocket error:', error);
+            });
+
+            azureWs.onmessage = (event) => {
+                const message = JSON.parse(event.data);
+                if (message.type === "message") {
+                    const data = JSON.parse(message.data);
+                    let currentUTC = new Date(Date.now() - clockDiffMs);
+                    console.log('----------------- Azure: ------------------',);
+                    console.log('data', message);
+
+                    console.log("Azure currentUTC:", currentUTC, currentUTC.getTime())
+                    console.log("Azure clockDiffMs:", clockDiffMs, Date.now(), Date.now() - clockDiffMs)
+                    const enqueuedTime = new Date(data.EnqueuedTime);
+                    const tradeTime = new Date(data.hDate);
+                    const latency = currentUTC.getTime() - enqueuedTime.getTime();
+                    const delayed = (
+                        (currentUTC.getTime() - tradeTime.getTime()) /
+                        1000
+                    ).toFixed(2);
+                    console.log("Azure tradeTime:", tradeTime.getTime())
+                    console.log("Azure delayed:", delayed)
+
+                    console.log("Dayjs Azure tradeTime", dayjs(data.hDate).format('HH:mm:ss:SSS') );
+                    console.log("Dayjs Azure  currentUtc", dayjs(currentUTC).format('HH:mm:ss:SSS'));
+                    console.log("Dayjs Azure  now", dayjs().format('HH:mm:ss:SSS'));
+
+                    console.log('---------------------------------------------------',);
+
+                    const l = createMessage(
+                        `${azureCount}. Received: ${currentUTC.toISOString()} - Enqueued: ${enqueuedTime.toISOString()} - Actual traded: ${tradeTime.toISOString()} | Latency: ${latency}ms -
+                         Delayed: ${delayed} seconds`, latency < 500 ? "green" : latency < 1000 ? "orange" : "red"
+                    );
+
+                    const d = createMessage(message.data);
+
+                    const azureContent = document.createElement("p");
+                    const divContainer = document.createElement("div");
+
+                    divContainer.appendChild(l)
+                    divContainer.appendChild(d);
+                    azureElement.appendChild(divContainer);
+                    azureCount += 1;
+
+                    azureElement.scrollTo({
+                        top: azureElement.scrollHeight,
+                        behavior: 'smooth'
+                    });
+                }
+            };
+
+            function clearOutput() {
+                output.innerHTML = ""
+            }
+
+            function clearOutputData() {
+                azureElement.innerHTML = ""
+                yahooElement.innerHTML = ""
+                yahooCount = 1;
+                azureCount = 1;
+            }
+
+            function subAndUnsubByInstrumentId(type, instrumentId) {
+                azureWs.send(
+                    JSON.stringify({ type, group: instrumentId, ackId: ++ackId })
+                );
+            }
+
+            function subAndUnsubByStockQuote(type, stockQuote) {
+                if (type === "joinGroup") {
+                    yahooWs.send(JSON.stringify({ subscribe: [stockQuote] }));
+                }
+                else {
+                    yahooWs.send(JSON.stringify({ unsubscribe: [stockQuote] }));
+
+                }
+            }
+
+            /**
+             * @param {'joinGroup' | 'leaveGroup'} type
+             * @param {'instrument' | 'stockQuote' | 'both'} connectType
+             */
+            function requestWebsocket(type, connectType, customSelectedValue) {
+                const selectedOption = getSelectedCompany(customSelectedValue)
+
+                const { instrumentId, stockQuote } = selectedOption;
+
+                if (['instrument', 'both'].includes(connectType)) subAndUnsubByInstrumentId(type, instrumentId)
+                if (['stockQuote', 'both'].includes(connectType)) subAndUnsubByStockQuote(type, stockQuote)
+
+                const action = type === "joinGroup" ? "subscribed" : "unsubscribed";
+                const color = type === "joinGroup" ? "green" : "red";
+
+                output.appendChild(
+                    createMessage(`Instrument ${instrumentId} (${stockQuote}) ${action}.`, color)
+                );
+            }
+
+            function validateInstrumentId(instrumentId) {
+                return instrumentId.trim() !== "";
+            }
+
+            function setClock(id, label, time) {
+                const clock = document.querySelector(id);
+                clock.innerText = `${label} ${time.toISOString()}`;
+            }
+
+            function createMessage(text, color) {
+                const message = document.createElement("p");
+                message.innerText = text;
+                if (color) message.style.color = color;
+                return message;
+            }
+
+            function getSelectedCompany(customValue) {
+                const selectedValue = customValue || companySelect.value;
+                const selectedOption = COMPANY_OPTIONS.find(x => x.instrumentId === selectedValue)
+                return selectedOption
+            }
+        })();
+
+    </script>
+</body>
+
+</html>
